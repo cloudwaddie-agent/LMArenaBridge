@@ -608,9 +608,9 @@ async def get_recaptcha_v3_token() -> Optional[str]:
             _m().RECAPTCHA_EXPIRY = datetime.now(timezone.utc) + timedelta(seconds=110)
             return chrome_token
 
-        # Use isolated world (main_world_eval=False) to avoid execution context destruction issues.
-        # We will access the main world objects via window.wrappedJSObject.
-        async with _m().AsyncCamoufox(headless=True, main_world_eval=False) as browser:
+        # Use main world (main_world_eval=True) to access wrappedJSObject properly.
+        # This is required to bypass Firefox's Xray wrapper for cross-origin reCAPTCHA objects.
+        async with _m().AsyncCamoufox(headless=True, main_world_eval=True) as browser:
             context = await browser.new_context()
             if cf_clearance:
                 await context.add_cookies([{
@@ -631,26 +631,28 @@ async def get_recaptcha_v3_token() -> Optional[str]:
             # Allow time for the widget to render if it's going to
             try:
                 # Check for challenge title or widget presence
-                for _ in range(5):
+                # Wait for up to 30 seconds for Turnstile to complete
+                max_attempts = 15  # 15 attempts × 2 seconds = 30 seconds max
+                for attempt in range(max_attempts):
                     title = await page.title()
-                    if "Just a moment" in title:
-                        _m().debug_print("  🔒 Cloudflare challenge active. Attempting to click...")
-                        clicked = await _m().click_turnstile(page)
-                        if clicked:
-                            _m().debug_print("  ✅ Clicked Turnstile.")
-                            # Give it time to verify
-                            await asyncio.sleep(3)
-                    else:
-                        # If title is normal, we might still have a widget on the page
-                        await _m().click_turnstile(page)
+                    if "Just a moment" not in title:
+                        # Title changed - Turnstile likely completed
+                        _m().debug_print(f"  ✅ Turnstile challenge resolved (title: {title[:30]}...)")
                         break
-                    await asyncio.sleep(1)
+                    _m().debug_print(f"  🔒 Cloudflare challenge active (attempt {attempt + 1}/{max_attempts})...")
+                    clicked = await _m().click_turnstile(page)
+                    if clicked:
+                        _m().debug_print("  🖱️  Clicked Turnstile.")
+                    # Wait before next attempt
+                    await asyncio.sleep(2)
+                else:
+                    # Loop completed without breaking - Turnstile may have timed out
+                    _m().debug_print("  ⚠️ Turnstile challenge may not have completed, continuing anyway...")
                 
                 # Wait for the page to actually settle into the main app
-                await page.wait_for_load_state("domcontentloaded")
+                await page.wait_for_load_state("networkidle")
             except Exception as e:
                 _m().debug_print(f"  ⚠️ Error handling Turnstile: {e}")
-            # ----------------------------------------------
 
             # 1. Wake up the page (Humanize)
             _m().debug_print("  🖱️  Waking up page...")
